@@ -7,11 +7,15 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"  // Added regexp import
+	"strconv" // For footnote check
 	"strings"
 	"time"
 
 	"github.com/charmbracelet/bubbles/list"
+	"github.com/charmbracelet/bubbles/viewport" // Added viewport import
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour" // Added glamour import
 	"github.com/charmbracelet/lipgloss"
 	"gopkg.in/yaml.v3"
 )
@@ -27,13 +31,14 @@ const (
 
 // --- Structs for Post Data ---
 type PostMetadata struct {
-	PostTitle   string    `yaml:"title"` // Renamed from Title to PostTitle
+	PostTitle   string    `yaml:"title"`
 	Excerpt     string    `yaml:"excerpt"`
 	PublishDate time.Time `yaml:"publishDate"`
 	Category    string    `yaml:"category"`
 	Tags        []string  `yaml:"tags"`
 	Slug        string    `yaml:"slug"`
 	Image       string    `yaml:"image"`
+	Content     string    // Added to store the full post content
 }
 
 // Implement list.Item for PostMetadata
@@ -70,40 +75,39 @@ type model struct {
 	postList         list.Model
 	loadingPosts     bool
 	postsError       error
-	selectedPost     *PostMetadata // Store selected post for detail view
+	selectedPost     *PostMetadata
+	viewport         viewport.Model // Added viewport for post content
+	ready            bool           // For viewport initialization
 }
 
 func initialModel() model {
+	// ... (existing list initialization) ...
 	delegate := list.NewDefaultDelegate()
 
 	adaptiveBg := lipgloss.AdaptiveColor{Light: "#FFFFFF", Dark: "#000000"}
-	// Main foreground for titles, matching the baseStyle's adaptiveForeground
 	adaptiveFg := lipgloss.AdaptiveColor{Light: "#000000", Dark: "#FFFFFF"}
-	// Dimmed foreground for descriptions, common for secondary text in lists
 	dimmedFg := lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"}
 
 	delegate.Styles.NormalTitle = lipgloss.NewStyle().
 		Foreground(adaptiveFg).
 		Background(adaptiveBg).
-		Padding(0, 0, 0, 2) // Default padding
+		Padding(0, 0, 0, 2)
 
 	delegate.Styles.NormalDesc = lipgloss.NewStyle().
 		Foreground(dimmedFg).
 		Background(adaptiveBg).
-		Padding(0, 0, 0, 2) // Default padding
+		Padding(0, 0, 0, 2)
 
-	// Selected items' styling from the screenshot seems acceptable (pink title, dark background for the row).
-	// We'll leave delegate.Styles.SelectedTitle and delegate.Styles.SelectedDesc as default,
-	// as they primarily define text color and a left border, not the row background.
-	// The list component itself handles the selected row's background highlight.
-
-	l := list.New([]list.Item{}, delegate, 0, 0) // Use the customized delegate
+	l := list.New([]list.Item{}, delegate, 0, 0)
 	l.Title = "Blog Posts"
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
-	l.Styles.Title = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true) // Pinkish title
+	l.Styles.Title = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
 	l.Styles.PaginationStyle = list.DefaultStyles().PaginationStyle.Foreground(lipgloss.Color("240"))
 	l.Styles.HelpStyle = list.DefaultStyles().HelpStyle.Foreground(lipgloss.Color("240"))
+
+	// Viewport setup - will be fully configured when a post is selected
+	vp := viewport.New(0,0) // Initial size, will be updated
 
 	return model{
 		currentScreen:    splashScreen,
@@ -112,6 +116,7 @@ func initialModel() model {
 		showFlashMessage: true,
 		loadingPosts:     false,
 		postList:         l,
+		viewport:         vp,
 	}
 }
 
@@ -234,6 +239,7 @@ func fetchPostsCmd() tea.Cmd {
 					if firstError == nil { firstError = fmt.Errorf("unmarshalling YAML for %s: %w", fileURL, err) }
 					continue
 				}
+				meta.Content = strings.TrimSpace(parts[2]) // Store the main content
 				posts = append(posts, meta)
 			} else if content.Type == "file" && strings.HasSuffix(content.Name, ".mdx") {
 				log.Printf("Skipping file %s as it has no download_url", content.Name)
@@ -250,7 +256,10 @@ func fetchPostsCmd() tea.Cmd {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(tick(), tea.EnterAltScreen) // EnterAltScreen is good for list views
+	// We need to send a WindowSizeMsg to initialize the viewport correctly after the UI is up.
+	// However, tea.EnterAltScreen and initial tick are also important.
+	// A common pattern is to handle initial sizing in the first WindowSizeMsg.
+	return tea.Batch(tick(), tea.EnterAltScreen)
 }
 
 func tick() tea.Cmd {
@@ -261,13 +270,54 @@ func tick() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
+	var cmd tea.Cmd // Capture commands from components like list and viewport
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+
+		headerHeight := lipgloss.Height(m.headerView()) // Calculate header height for viewport
+		footerHeight := lipgloss.Height(m.footerView()) // Calculate footer height for viewport
+
+		if !m.ready { // First WindowSizeMsg, set up viewport
+			m.viewport = viewport.New(msg.Width, msg.Height-headerHeight-footerHeight)
+			m.viewport.YPosition = headerHeight
+			// Use a glamour style that fits the dark/light theme
+			// For dark themes, "dark"; for light themes, "light" or "notty".
+			// We can make this adaptive later if needed.
+			// glamourRenderer, _ := glamour.NewTermRenderer(glamour.WithAutoStyle())
+			// m.viewport.Style = glamourRenderer.Style // This is not how glamour styles are applied to viewport
+			m.ready = true
+		} else {
+			m.viewport.Width = msg.Width
+			m.viewport.Height = msg.Height - headerHeight - footerHeight
+		}
+
 		m.postList.SetWidth(msg.Width)
-		m.postList.SetHeight(msg.Height)
+		m.postList.SetHeight(msg.Height) // List takes full height when active
+
+		// If we are on postDetailScreen and have content, re-render and set for viewport
+		if m.currentScreen == postDetailScreen && m.selectedPost != nil {
+			transformedMd := transformLinksToFootnotes(m.selectedPost.Content)
+			rendrer, err := glamour.NewTermRenderer(
+				glamour.WithAutoStyle(),
+				glamour.WithWordWrap(m.viewport.Width-2),
+				glamour.WithPreservedNewLines(),
+			)
+			if err != nil { 
+				log.Printf("Error creating glamour renderer: %v", err)
+				m.viewport.SetContent("Error initializing renderer.")
+			} else {
+				formattedContent, err := rendrer.Render(transformedMd) // Use transformedMd
+				if err != nil {
+					log.Printf("Error rendering markdown: %v", err)
+					m.viewport.SetContent("Error rendering content.")
+				} else {
+					m.viewport.SetContent(formattedContent)
+				}
+			}
+		}
 
 	case tea.KeyMsg:
 		switch m.currentScreen {
@@ -279,12 +329,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentScreen = listScreen
 				m.loadingPosts = true
 				m.postsError = nil
-				m.postList.SetItems([]list.Item{}) // Clear previous items
+				m.postList.SetItems([]list.Item{}) 
 				cmds = append(cmds, fetchPostsCmd())
 			}
 		case listScreen:
 			if m.postList.FilterState() == list.Filtering {
-				// Let the list handle keys during filtering
+				// Let the list handle keys
 			} else {
 				switch msg.String() {
 				case "q", "esc":
@@ -299,18 +349,42 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if post, ok := item.(PostMetadata); ok {
 							m.selectedPost = &post
 							m.currentScreen = postDetailScreen
+							// Render and set content for viewport
+							transformedMd := transformLinksToFootnotes(post.Content)
+							rendrer, err := glamour.NewTermRenderer(
+								glamour.WithAutoStyle(),
+								glamour.WithWordWrap(m.viewport.Width-2),
+								glamour.WithPreservedNewLines(),
+							)
+							if err != nil { 
+								log.Printf("Error creating glamour renderer: %v", err)
+								m.viewport.SetContent("Error initializing renderer.")
+							} else {
+								formattedContent, err := rendrer.Render(transformedMd) // Use transformedMd
+								if err != nil {
+									log.Printf("Error rendering markdown: %v", err)
+									m.viewport.SetContent("Error rendering content.")
+								} else {
+									m.viewport.SetContent(formattedContent)
+								}
+							}
+							m.viewport.GotoTop() 
 						}
 					}
 				}
 			}
-			var listCmd tea.Cmd
-			m.postList, listCmd = m.postList.Update(msg)
-			cmds = append(cmds, listCmd)
+			// Update the list model (it might also return a cmd)
+			m.postList, cmd = m.postList.Update(msg)
+			cmds = append(cmds, cmd)
 		case postDetailScreen:
 			switch msg.String() {
 			case "q", "esc", "b", "backspace":
 				m.currentScreen = listScreen
-				m.selectedPost = nil
+				m.selectedPost = nil // Clear selected post
+				m.viewport.SetContent("") // Clear viewport content
+			default: // Pass other keys to viewport for scrolling
+				m.viewport, cmd = m.viewport.Update(msg)
+				cmds = append(cmds, cmd)
 			}
 		}
 
@@ -325,21 +399,34 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.postsError = msg.err
 			log.Printf("Error in postsLoadedMsg: %v", msg.err)
-			m.postList.SetItems([]list.Item{}) // Clear list on error
+			m.postList.SetItems([]list.Item{}) 
 		} else {
 			items := make([]list.Item, len(msg.posts))
 			for i, p := range msg.posts {
-				items[i] = p // PostMetadata now implements list.Item
+				items[i] = p 
 			}
 			m.postList.SetItems(items)
-			m.postsError = nil // Clear any previous error
+			m.postsError = nil 
 		}
 	}
 	return m, tea.Batch(cmds...)
 }
 
+// Helper views for header/footer of postDetailScreen
+func (m model) headerView() string {
+	if m.selectedPost == nil {
+		return ""
+	}
+	postTitleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Padding(0,1)
+	return postTitleStyle.Render(m.selectedPost.PostTitle)
+}
+
+func (m model) footerView() string {
+	return lipgloss.NewStyle().Padding(0,1).Render("[↑/k up, ↓/j down, q/esc/b back]")
+}
+
 func (m model) View() string {
-	if m.width == 0 || m.height == 0 {
+	if !m.ready { // Don't render until viewport is initialized
 		return "Initializing..."
 	}
 
@@ -352,7 +439,7 @@ func (m model) View() string {
 
 	switch m.currentScreen {
 	case splashScreen:
-		splashContainerStyle := baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center) // Removed .Copy()
+		splashContainerStyle := baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center)
 		mainMessageStyle := lipgloss.NewStyle().Foreground(adaptiveForeground)
 		mainMessageContent := mainMessageStyle.Render(m.splashMessage)
 		flashingMessageContent := ""
@@ -377,8 +464,6 @@ func (m model) View() string {
 			content := fmt.Sprintf("Error loading posts: %v\n\n(Press 'b' to go back or 'q' to quit)", m.postsError)
 			return errorStyle.Render(content)
 		}
-		// The list.Model.View() will handle rendering the list within the dimensions it was given.
-		// We wrap it in a style that ensures the baseStyle (background, etc.) covers the whole screen area.
 		listScreenContainerStyle := baseStyle.Width(m.width).Height(m.height)
 		return listScreenContainerStyle.Render(m.postList.View())
 
@@ -386,24 +471,71 @@ func (m model) View() string {
 		if m.selectedPost == nil {
 			return baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center).Render("No post selected. Press 'b' to go back.")
 		}
-		post := m.selectedPost
-		detail := lipgloss.JoinVertical(lipgloss.Left,
-			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render(post.PostTitle),
-			"",
-			"Date: "+post.PublishDate.Format("2006-01-02"),
-			"Category: "+post.Category,
-			"Tags: "+strings.Join(post.Tags, ", "),
-			"",
-			post.Excerpt,
-			"",
-			"[Press 'b' or 'esc' to go back]",
+		header := m.headerView()
+		footer := m.footerView()
+		// The viewport takes care of rendering its content within its bounds.
+		// We just need to place the header, viewport, and footer.
+		return lipgloss.JoinVertical(lipgloss.Left,
+			header,
+			m.viewport.View(),
+			footer,
 		)
-		return baseStyle.Width(m.width).Height(m.height).Padding(1,2).Render(detail)
 
 	default:
-		unknownScreenStyle := baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center) // Removed .Copy()
+		unknownScreenStyle := baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center)
 		return unknownScreenStyle.Render("Unknown screen")
 	}
+}
+
+// transformLinksToFootnotes takes a markdown string and converts inline links to footnotes.
+// It returns the modified markdown and a list of URLs for the footnotes.
+func transformLinksToFootnotes(markdownContent string) string {
+	// Regex for [text](url) using a raw string literal for clarity and correctness.
+	// Group 1: text
+	// Group 2: url
+	re := regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`) // Use raw string literal
+
+	var footnotes []string
+	footnoteIndex := 1
+
+	transformedContent := re.ReplaceAllStringFunc(markdownContent, func(match string) string {
+		submatches := re.FindStringSubmatch(match)
+		if len(submatches) < 3 {
+			return match 
+		}
+		linkText := submatches[1]
+		url := submatches[2]
+
+		// Basic check to avoid re-processing if it looks like a footnote marker already
+		// e.g., if linkText is "[123]"
+		if strings.HasPrefix(linkText, "[") && strings.HasSuffix(linkText, "]") {
+			if _, err := strconv.Atoi(linkText[1 : len(linkText)-1]); err == nil {
+				return match // It's already a footnote reference like "[1]", skip.
+			}
+		}
+		
+		// Avoid re-processing if the URL part is already a footnote definition (common in some markdown outputs)
+		if strings.HasPrefix(url, "#fn:") || strings.HasPrefix(url, "#fnref:") {
+		    return match
+		}
+
+
+		footnotes = append(footnotes, url)
+		newLink := fmt.Sprintf("%s [%d]", linkText, footnoteIndex)
+		footnoteIndex++
+		return newLink
+	})
+
+	if len(footnotes) > 0 {
+		var footnotesSection strings.Builder
+		footnotesSection.WriteString("\n\n---\n**Footnotes:**\n")
+		for i, url := range footnotes {
+			footnotesSection.WriteString(fmt.Sprintf("[%d]: %s\n", i+1, url))
+		}
+		transformedContent += footnotesSection.String()
+	}
+
+	return transformedContent
 }
 
 func main() {
