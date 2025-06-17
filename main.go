@@ -10,6 +10,7 @@ import (
 	"os"
 	"regexp"  // Added regexp import
 	"strconv" // For footnote check
+	"sort"
 	"strings"
 	"time"
 
@@ -250,6 +251,11 @@ func fetchPostsCmd() tea.Cmd {
 				log.Printf("Skipping file %s as it has no download_url", content.Name)
 			}
 		}
+
+		// Sort posts by PublishDate in descending order
+		sort.Slice(posts, func(i, j int) bool {
+			return posts[i].PublishDate.After(posts[j].PublishDate)
+		})
 
 		if len(posts) == 0 && firstError != nil {
 			return postsLoadedMsg{posts: nil, err: fmt.Errorf("failed to load any posts, first error: %w", firstError)}
