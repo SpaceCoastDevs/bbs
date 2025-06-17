@@ -22,7 +22,7 @@ type screenState int
 const (
 	splashScreen screenState = iota
 	listScreen
-	// errorScreen // Good to have for error display
+	postDetailScreen // Added for post detail view
 )
 
 // --- Structs for Post Data ---
@@ -67,15 +67,37 @@ type model struct {
 	showFlashMessage bool
 	width            int
 	height           int
-	// posts            []PostMetadata // Will be managed by the list model
-	postList         list.Model // Added list model
+	postList         list.Model
 	loadingPosts     bool
 	postsError       error
+	selectedPost     *PostMetadata // Store selected post for detail view
 }
 
 func initialModel() model {
-	// Default list setup
-	l := list.New([]list.Item{}, list.NewDefaultDelegate(), 0, 0)
+	delegate := list.NewDefaultDelegate()
+
+	adaptiveBg := lipgloss.AdaptiveColor{Light: "#FFFFFF", Dark: "#000000"}
+	// Main foreground for titles, matching the baseStyle's adaptiveForeground
+	adaptiveFg := lipgloss.AdaptiveColor{Light: "#000000", Dark: "#FFFFFF"}
+	// Dimmed foreground for descriptions, common for secondary text in lists
+	dimmedFg := lipgloss.AdaptiveColor{Light: "#A49FA5", Dark: "#777777"}
+
+	delegate.Styles.NormalTitle = lipgloss.NewStyle().
+		Foreground(adaptiveFg).
+		Background(adaptiveBg).
+		Padding(0, 0, 0, 2) // Default padding
+
+	delegate.Styles.NormalDesc = lipgloss.NewStyle().
+		Foreground(dimmedFg).
+		Background(adaptiveBg).
+		Padding(0, 0, 0, 2) // Default padding
+
+	// Selected items' styling from the screenshot seems acceptable (pink title, dark background for the row).
+	// We'll leave delegate.Styles.SelectedTitle and delegate.Styles.SelectedDesc as default,
+	// as they primarily define text color and a left border, not the row background.
+	// The list component itself handles the selected row's background highlight.
+
+	l := list.New([]list.Item{}, delegate, 0, 0) // Use the customized delegate
 	l.Title = "Blog Posts"
 	l.SetShowStatusBar(true)
 	l.SetFilteringEnabled(true)
@@ -244,9 +266,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		// Update list size
 		m.postList.SetWidth(msg.Width)
-		m.postList.SetHeight(msg.Height - 2) // Reserve space for title/status or other elements
+		m.postList.SetHeight(msg.Height)
 
 	case tea.KeyMsg:
 		switch m.currentScreen {
@@ -258,30 +279,39 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.currentScreen = listScreen
 				m.loadingPosts = true
 				m.postsError = nil
-				// m.posts = nil // No longer directly storing posts here
 				m.postList.SetItems([]list.Item{}) // Clear previous items
 				cmds = append(cmds, fetchPostsCmd())
 			}
 		case listScreen:
-			// Handle list-specific keys first if the list is not filtering
 			if m.postList.FilterState() == list.Filtering {
 				// Let the list handle keys during filtering
 			} else {
 				switch msg.String() {
-				case "q", "esc": // Keep q/esc for quitting even in list view
+				case "q", "esc":
 					return m, tea.Quit
 				case "b", "backspace":
 					m.currentScreen = splashScreen
 					m.showFlashMessage = true
 					m.postsError = nil
 					cmds = append(cmds, tick())
-					// No return here, allow list update below
+				case "enter":
+					if item := m.postList.SelectedItem(); item != nil {
+						if post, ok := item.(PostMetadata); ok {
+							m.selectedPost = &post
+							m.currentScreen = postDetailScreen
+						}
+					}
 				}
 			}
-			// Update the list model
 			var listCmd tea.Cmd
 			m.postList, listCmd = m.postList.Update(msg)
 			cmds = append(cmds, listCmd)
+		case postDetailScreen:
+			switch msg.String() {
+			case "q", "esc", "b", "backspace":
+				m.currentScreen = listScreen
+				m.selectedPost = nil
+			}
 		}
 
 	case tickMsg:
@@ -316,7 +346,7 @@ func (m model) View() string {
 	adaptiveBackground := lipgloss.AdaptiveColor{Light: "#FFFFFF", Dark: "#000000"}
 	adaptiveForeground := lipgloss.AdaptiveColor{Light: "#000000", Dark: "#FFFFFF"}
 
-	baseStyle := lipgloss.NewStyle(). // Base style no longer sets width/height directly for list
+	baseStyle := lipgloss.NewStyle().
 		Background(adaptiveBackground).
 		Foreground(adaptiveForeground)
 
@@ -339,18 +369,36 @@ func (m model) View() string {
 
 	case listScreen:
 		if m.loadingPosts {
-			loadingStyle := baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center) // Removed .Copy()
+			loadingStyle := baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center)
 			return loadingStyle.Render("Loading posts...")
 		}
 		if m.postsError != nil {
-			errorStyle := baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center) // Removed .Copy()
+			errorStyle := baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center)
 			content := fmt.Sprintf("Error loading posts: %v\n\n(Press 'b' to go back or 'q' to quit)", m.postsError)
 			return errorStyle.Render(content)
 		}
-		// The list.Model.View() will handle rendering the list.
-		// We can wrap it in a lipgloss style for padding or borders if needed.
-		listContainerStyle := baseStyle.Padding(0,1) // Removed .Copy()
-		return listContainerStyle.Render(m.postList.View())
+		// The list.Model.View() will handle rendering the list within the dimensions it was given.
+		// We wrap it in a style that ensures the baseStyle (background, etc.) covers the whole screen area.
+		listScreenContainerStyle := baseStyle.Width(m.width).Height(m.height)
+		return listScreenContainerStyle.Render(m.postList.View())
+
+	case postDetailScreen:
+		if m.selectedPost == nil {
+			return baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center).Render("No post selected. Press 'b' to go back.")
+		}
+		post := m.selectedPost
+		detail := lipgloss.JoinVertical(lipgloss.Left,
+			lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("205")).Render(post.PostTitle),
+			"",
+			"Date: "+post.PublishDate.Format("2006-01-02"),
+			"Category: "+post.Category,
+			"Tags: "+strings.Join(post.Tags, ", "),
+			"",
+			post.Excerpt,
+			"",
+			"[Press 'b' or 'esc' to go back]",
+		)
+		return baseStyle.Width(m.width).Height(m.height).Padding(1,2).Render(detail)
 
 	default:
 		unknownScreenStyle := baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center) // Removed .Copy()
@@ -365,7 +413,6 @@ func main() {
 	}
 	defer f.Close()
 
-	// initialModel() now sets up the list, so we don't need to pass specific options here for it.
 	p := tea.NewProgram(initialModel())
 	if _, errP := p.Run(); errP != nil { // Renamed err to errP to avoid conflict with f.Close() error
 		log.Fatalf("Error running program: %v", errP)
