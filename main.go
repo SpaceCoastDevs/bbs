@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"regexp"  // Added regexp import
 	"strconv" // For footnote check
 	"strings"
@@ -16,7 +17,11 @@ import (
 	"github.com/charmbracelet/bubbles/viewport" // Added viewport import
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour" // Added glamour import
+	"github.com/charmbracelet/keygen"
 	"github.com/charmbracelet/lipgloss"
+	ssh "github.com/charmbracelet/ssh"
+	"github.com/charmbracelet/wish"
+	"github.com/charmbracelet/wish/bubbletea"
 	"gopkg.in/yaml.v3"
 )
 
@@ -539,6 +544,36 @@ func transformLinksToFootnotes(markdownContent string) string {
 }
 
 func main() {
+	// If running as an SSH app, start the SSH server
+	if len(os.Args) > 1 && os.Args[1] == "ssh" {
+		_, err := keygen.New("ssh_host_ed25519", keygen.WithKeyType(keygen.Ed25519))
+		if err != nil {
+			log.Fatalf("could not generate SSH key: %v", err)
+		}
+		pemBytes, err := os.ReadFile("ssh_host_ed25519")
+		if err != nil {
+			log.Fatalf("could not read SSH key PEM file: %v", err)
+		}
+		server, err := wish.NewServer(
+			wish.WithAddress(":23234"), // You can change the port as needed
+			wish.WithHostKeyPEM(pemBytes),
+			wish.WithMiddleware(
+				bubbletea.Middleware(func(sess ssh.Session) (tea.Model, []tea.ProgramOption) {
+					return initialModel(), nil
+				}),
+			),
+		)
+		if err != nil {
+			log.Fatalf("could not start SSH server: %v", err)
+		}
+		log.Printf("SSH TUI server started on port 23234. Connect with: ssh -p 23234 <user>@<host>")
+		if err := server.ListenAndServe(); err != nil {
+			log.Fatalf("SSH server error: %v", err)
+		}
+		return
+	}
+
+	// Local TUI mode (default)
 	f, err := tea.LogToFile("debug.log", "debug")
 	if err != nil {
 		log.Fatalf("could not open log file: %v", err)
@@ -546,7 +581,7 @@ func main() {
 	defer f.Close()
 
 	p := tea.NewProgram(initialModel())
-	if _, errP := p.Run(); errP != nil { // Renamed err to errP to avoid conflict with f.Close() error
+	if _, errP := p.Run(); errP != nil {
 		log.Fatalf("Error running program: %v", errP)
 	}
 }

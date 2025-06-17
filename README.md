@@ -49,19 +49,31 @@ This project uses Go modules. Key dependencies include:
     go mod tidy
     ```
 
-3.  **Build the application:**
+3.  **Generate SSH Key**
+    You need to manually generate a key for the SSH server:
     ```bash
-    go build -o blogtui main.go
+    ssh-keygen -l -f ssh_host_ed25519
     ```
-    This will create an executable named `blogtui` (or you can choose another name). If you just run `go build`, the executable will be named after the project directory (e.g., `ssh-space-coast.dev`).
+
+4.  **Build the application:**
+    ```bash
+    go build -o bbs main.go
+    ```
+    This will create an executable named `bbs` (or you can choose another name). If you run `go build`, the executable will be named after the project directory (e.g., `ssh-space-coast.dev`).
 
 ### Running
 
 Execute the compiled binary:
 ```bash
-./blogtui
+./bbs
 ```
-(Replace `blogtui` with the actual name of your executable if you chose a different one).
+(Replace `bbs` with the actual name of your executable if you chose a different one).
+
+Execute the compiled binary in SSH mode:
+```bash
+./bbs ssh
+```
+(Replace `bbs` with the actual name of your executable if you chose a different one).
 
 ### Controls
 
