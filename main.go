@@ -32,7 +32,6 @@ type screenState int
 const (
 	splashScreen screenState = iota
 	listScreen
-	postDetailScreen // Added for post detail view
 )
 
 // --- Structs for Post Data ---
@@ -281,54 +280,26 @@ func tick() tea.Cmd {
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
-	var cmd tea.Cmd // Capture commands from components like list and viewport
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
 
-		headerHeight := lipgloss.Height(m.headerView()) // Calculate header height for viewport
-		footerHeight := lipgloss.Height(m.footerView()) // Calculate footer height for viewport
-
 		if !m.ready { // First WindowSizeMsg, set up viewport
-			m.viewport = viewport.New(msg.Width, msg.Height-headerHeight-footerHeight)
-			m.viewport.YPosition = headerHeight
-			// Use a glamour style that fits the dark/light theme
-			// For dark themes, "dark"; for light themes, "light" or "notty".
-			// We can make this adaptive later if needed.
-			// glamourRenderer, _ := glamour.NewTermRenderer(glamour.WithAutoStyle())
-			// m.viewport.Style = glamourRenderer.Style // This is not how glamour styles are applied to viewport
+			// For listScreen, we need full height minus space for footer
+			footerHeight := 2 // Space for footer help text
+			m.viewport = viewport.New(msg.Width, msg.Height-footerHeight)
 			m.ready = true
 		} else {
+			// For listScreen, we need full height minus space for footer
+			footerHeight := 2 // Space for footer help text
 			m.viewport.Width = msg.Width
-			m.viewport.Height = msg.Height - headerHeight - footerHeight
+			m.viewport.Height = msg.Height - footerHeight
 		}
 
 		m.postList.SetWidth(msg.Width)
 		m.postList.SetHeight(msg.Height) // List takes full height when active
-
-		// If we are on postDetailScreen and have content, re-render and set for viewport
-		if m.currentScreen == postDetailScreen && m.selectedPost != nil {
-			transformedMd := transformLinksToFootnotes(m.selectedPost.Content)
-			rendrer, err := glamour.NewTermRenderer(
-				glamour.WithAutoStyle(),
-				glamour.WithWordWrap(m.viewport.Width-2),
-				glamour.WithPreservedNewLines(),
-			)
-			if err != nil { 
-				log.Printf("Error creating glamour renderer: %v", err)
-				m.viewport.SetContent("Error initializing renderer.")
-			} else {
-				formattedContent, err := rendrer.Render(transformedMd) // Use transformedMd
-				if err != nil {
-					log.Printf("Error rendering markdown: %v", err)
-					m.viewport.SetContent("Error rendering content.")
-				} else {
-					m.viewport.SetContent(formattedContent)
-				}
-			}
-		}
 
 	case tea.KeyMsg:
 		switch m.currentScreen {
@@ -344,58 +315,26 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, fetchPostsCmd())
 			}
 		case listScreen:
-			if m.postList.FilterState() == list.Filtering {
-				// Let the list handle keys
-			} else {
-				switch msg.String() {
-				case "q", "esc":
-					return m, tea.Quit
-				case "b", "backspace":
-					m.currentScreen = splashScreen
-					m.showFlashMessage = true
-					m.postsError = nil
-					cmds = append(cmds, tick())
-				case "enter":
-					if item := m.postList.SelectedItem(); item != nil {
-						if post, ok := item.(PostMetadata); ok {
-							m.selectedPost = &post
-							m.currentScreen = postDetailScreen
-							// Render and set content for viewport
-							transformedMd := transformLinksToFootnotes(post.Content)
-							rendrer, err := glamour.NewTermRenderer(
-								glamour.WithAutoStyle(),
-								glamour.WithWordWrap(m.viewport.Width-2),
-								glamour.WithPreservedNewLines(),
-							)
-							if err != nil { 
-								log.Printf("Error creating glamour renderer: %v", err)
-								m.viewport.SetContent("Error initializing renderer.")
-							} else {
-								formattedContent, err := rendrer.Render(transformedMd) // Use transformedMd
-								if err != nil {
-									log.Printf("Error rendering markdown: %v", err)
-									m.viewport.SetContent("Error rendering content.")
-								} else {
-									m.viewport.SetContent(formattedContent)
-								}
-							}
-							m.viewport.GotoTop() 
-						}
-					}
-				}
-			}
-			// Update the list model (it might also return a cmd)
-			m.postList, cmd = m.postList.Update(msg)
-			cmds = append(cmds, cmd)
-		case postDetailScreen:
 			switch msg.String() {
-			case "q", "esc", "b", "backspace":
-				m.currentScreen = listScreen
-				m.selectedPost = nil // Clear selected post
-				m.viewport.SetContent("") // Clear viewport content
-			default: // Pass other keys to viewport for scrolling
-				m.viewport, cmd = m.viewport.Update(msg)
-				cmds = append(cmds, cmd)
+			case "q", "esc":
+				return m, tea.Quit
+			case "b", "backspace":
+				m.currentScreen = splashScreen
+				m.showFlashMessage = true
+				m.postsError = nil
+				cmds = append(cmds, tick())
+			case "↑", "k":
+				m.viewport.ScrollUp(1)
+			case "↓", "j":
+				m.viewport.ScrollDown(1)
+			case "pageup":
+				m.viewport.ScrollUp(m.viewport.Height)
+			case "pagedown":
+				m.viewport.ScrollDown(m.viewport.Height)
+			case "home":
+				m.viewport.GotoTop()
+			case "end":
+				m.viewport.GotoBottom()
 			}
 		}
 
@@ -417,7 +356,29 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				items[i] = p 
 			}
 			m.postList.SetItems(items)
-			m.postsError = nil 
+			m.postsError = nil
+			
+			// Set viewport content with the latest post
+			if len(msg.posts) > 0 {
+				latestPost := msg.posts[0]
+				postContent := transformLinksToFootnotes(stripTags(latestPost.Content))
+				glowRenderer, err := glamour.NewTermRenderer(
+					glamour.WithAutoStyle(),
+					glamour.WithWordWrap(m.viewport.Width-2),
+				)
+				if err != nil {
+					log.Printf("Error creating glamour renderer: %v", err)
+					m.viewport.SetContent("Error initializing renderer.")
+				} else {
+					formattedContent, err := glowRenderer.Render(postContent)
+					if err != nil {
+						log.Printf("Error rendering markdown: %v", err)
+						m.viewport.SetContent("Error rendering content.")
+					} else {
+						m.viewport.SetContent(formattedContent)
+					}
+				}
+			}
 		}
 	}
 	return m, tea.Batch(cmds...)
@@ -476,24 +437,7 @@ func (m model) View() string {
 			return errorStyle.Render(content)
 		}
 		if len(m.postList.Items()) > 0 {
-			latestPost := m.postList.Items()[0].(PostMetadata)
-			postContent := transformLinksToFootnotes(stripTags(latestPost.Content))
-			glowRenderer, err := glamour.NewTermRenderer(
-				glamour.WithAutoStyle(),
-				glamour.WithWordWrap(m.viewport.Width-2),
-			)
-			if err != nil {
-				log.Printf("Error creating glamour renderer: %v", err)
-				m.viewport.SetContent("Error initializing renderer.")
-			} else {
-				formattedContent, err := glowRenderer.Render(postContent)
-				if err != nil {
-					log.Printf("Error rendering markdown: %v", err)
-					m.viewport.SetContent("Error rendering content.")
-				} else {
-					m.viewport.SetContent(formattedContent)
-				}
-			}
+			// Don't reset viewport content here - it was set when posts were loaded
 			return lipgloss.JoinVertical(lipgloss.Left,
 				m.viewport.View(),
 				lipgloss.NewStyle().Padding(0, 1).Render("[↑/k up, ↓/j down, q/esc quit]"),
