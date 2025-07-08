@@ -323,9 +323,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showFlashMessage = true
 				m.postsError = nil
 				cmds = append(cmds, tick())
-			case "↑", "k":
+			case "up", "k":
 				m.viewport.ScrollUp(1)
-			case "↓", "j":
+			case "down", "j":
 				m.viewport.ScrollDown(1)
 			case "pageup":
 				m.viewport.ScrollUp(m.viewport.Height)
