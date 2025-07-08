@@ -8,9 +8,9 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"regexp"  // Added regexp import
-	"strconv" // For footnote check
+	"regexp" // Added regexp import
 	"sort"
+	"strconv" // For footnote check
 	"strings"
 	"time"
 
@@ -468,29 +468,39 @@ func (m model) View() string {
 	case listScreen:
 		if m.loadingPosts {
 			loadingStyle := baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center)
-			return loadingStyle.Render("Loading posts...")
+			return loadingStyle.Render("Loading latest post...")
 		}
 		if m.postsError != nil {
 			errorStyle := baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center)
-			content := fmt.Sprintf("Error loading posts: %v\n\n(Press 'b' to go back or 'q' to quit)", m.postsError)
+			content := fmt.Sprintf("Error loading post: %v\n\n(Press 'q' to quit)", m.postsError)
 			return errorStyle.Render(content)
 		}
-		listScreenContainerStyle := baseStyle.Width(m.width).Height(m.height)
-		return listScreenContainerStyle.Render(m.postList.View())
-
-	case postDetailScreen:
-		if m.selectedPost == nil {
-			return baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center).Render("No post selected. Press 'b' to go back.")
+		if len(m.postList.Items()) > 0 {
+			latestPost := m.postList.Items()[0].(PostMetadata)
+			postContent := transformLinksToFootnotes(stripTags(latestPost.Content))
+			glowRenderer, err := glamour.NewTermRenderer(
+				glamour.WithAutoStyle(),
+				glamour.WithWordWrap(m.viewport.Width-2),
+			)
+			if err != nil {
+				log.Printf("Error creating glamour renderer: %v", err)
+				m.viewport.SetContent("Error initializing renderer.")
+			} else {
+				formattedContent, err := glowRenderer.Render(postContent)
+				if err != nil {
+					log.Printf("Error rendering markdown: %v", err)
+					m.viewport.SetContent("Error rendering content.")
+				} else {
+					m.viewport.SetContent(formattedContent)
+				}
+			}
+			return lipgloss.JoinVertical(lipgloss.Left,
+				m.viewport.View(),
+				lipgloss.NewStyle().Padding(0, 1).Render("[↑/k up, ↓/j down, q/esc quit]"),
+			)
 		}
-		header := m.headerView()
-		footer := m.footerView()
-		// The viewport takes care of rendering its content within its bounds.
-		// We just need to place the header, viewport, and footer.
-		return lipgloss.JoinVertical(lipgloss.Left,
-			header,
-			m.viewport.View(),
-			footer,
-		)
+		return baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center).Render("No posts available.")
+
 
 	default:
 		unknownScreenStyle := baseStyle.Width(m.width).Height(m.height).Align(lipgloss.Center, lipgloss.Center)
@@ -549,6 +559,12 @@ func transformLinksToFootnotes(markdownContent string) string {
 	return transformedContent
 }
 
+// Update the stripTags function to remove specific import statements.
+func stripTags(content string) string {
+	re := regexp.MustCompile(`<[^>]+>|{[^}]+}|import CallToAction from '~\/components\/widgets\/CallToAction\.astro';`)
+	return re.ReplaceAllString(content, "")
+}
+
 func main() {
 	// If running as an SSH app, start the SSH server
 	if len(os.Args) > 1 && os.Args[1] == "ssh" {
@@ -591,29 +607,3 @@ func main() {
 		log.Fatalf("Error running program: %v", errP)
 	}
 }
-
-// itemDelegate is a custom list item delegate (example)
-// We are using the default one for now, but this shows how you could customize rendering.
-/*
-type itemDelegate struct{}
-
-func (d itemDelegate) Height() int                               { return 1 } // Or more if you render multiple lines
-func (d itemDelegate) Spacing() int                              { return 0 }
-func (d itemDelegate) Update(msg tea.Msg, m *list.Model) tea.Cmd { return nil }
-func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list.Item) {
-	p, ok := listItem.(PostMetadata)
-	if !ok {
-		return
-	}
-
-	str := fmt.Sprintf("%d. %s", index+1, p.Title())
-	if m.Index() == index {
-		// Style for selected item
-		fmt.Fprint(w, lipgloss.NewStyle().Foreground(lipgloss.Color("202")).Render("> "+str))
-	} else {
-		// Style for normal item
-		fmt.Fprint(w, str)
-	}
-	// You could add p.Description() on a new line here if Height() > 1
-}
-*/
