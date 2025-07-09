@@ -18,7 +18,6 @@ import (
 	"github.com/charmbracelet/bubbles/viewport" // Added viewport import
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour" // Added glamour import
-	"github.com/charmbracelet/keygen"
 	"github.com/charmbracelet/lipgloss"
 	ssh "github.com/charmbracelet/ssh"
 	"github.com/charmbracelet/wish"
@@ -512,16 +511,20 @@ func stripTags(content string) string {
 func main() {
 	// If running as an SSH app, start the SSH server
 	if len(os.Args) > 1 && os.Args[1] == "ssh" {
-		_, err := keygen.New("ssh_host_ed25519", keygen.WithKeyType(keygen.Ed25519))
-		if err != nil {
-			log.Fatalf("could not generate SSH key: %v", err)
-		}
 		pemBytes, err := os.ReadFile("ssh_host_ed25519")
 		if err != nil {
 			log.Fatalf("could not read SSH key PEM file: %v", err)
 		}
+		
+		// Get port from environment variable or use default
+		port := os.Getenv("PORT")
+		if port == "" {
+			port = "23234"
+		}
+		address := ":" + port
+		
 		server, err := wish.NewServer(
-			wish.WithAddress(":23234"), // You can change the port as needed
+			wish.WithAddress(address),
 			wish.WithHostKeyPEM(pemBytes),
 			wish.WithMiddleware(
 				bubbletea.Middleware(func(sess ssh.Session) (tea.Model, []tea.ProgramOption) {
@@ -532,7 +535,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("could not start SSH server: %v", err)
 		}
-		log.Printf("SSH TUI server started on port 23234. Connect with: ssh -p 23234 <user>@<host>")
+		log.Printf("SSH TUI server started on port %s. Connect with: ssh -p %s <user>@<host>", port, port)
 		if err := server.ListenAndServe(); err != nil {
 			log.Fatalf("SSH server error: %v", err)
 		}

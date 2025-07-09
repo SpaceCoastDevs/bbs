@@ -12,4 +12,4 @@ FROM alpine:latest
 COPY --from=builder /main /main
 
 EXPOSE 22
-CMD ["/main"]
+CMD ["/main ssh"]
