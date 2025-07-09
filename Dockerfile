@@ -6,10 +6,14 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN go build -o /main .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main .
 
 FROM alpine:latest
-COPY --from=builder /main /main
+RUN apk --no-cache add ca-certificates
+WORKDIR /root/
+
+COPY --from=builder /app/main .
+RUN chmod +x main
 
 EXPOSE 22
-CMD ["/main ssh"]
+CMD ["./main", "ssh"]
